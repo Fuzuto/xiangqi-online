@@ -13,10 +13,22 @@ Latest behavior update verified locally on 2026-10-26:
 
 The source is on the local `main` branch with separate scaffold, rules, backend, interface, and release-documentation commits.
 
-## Remaining external verification
+## Public production release
 
-The connected Vercel account returned a team permission error during integration inspection. No cloud project, GitHub repository, or deployment was created. Publishing requires team access and configured Upstash Redis/QStash services.
+Published on 2026-10-26:
 
-Live Redis atomic operations and event delivery, native Vercel WebSocket upgrades/reconnect, and actual idle timeout callback delivery still require verification on that configured deployment. Local tests use the development file store; it is refused in normal production. The local file lock has basic crash recovery and is not a production persistence layer.
+- Public repository: [Fuzuto/xiangqi-online](https://github.com/Fuzuto/xiangqi-online), with the original local commit history on `main`.
+- Public production app: [xiangqi-online-one.vercel.app](https://xiangqi-online-one.vercel.app), accessible without Vercel authentication.
+- Vercel project `xiangqi-online` uses Node.js 24 and Fluid compute in `iad1`.
+- Owned production Upstash Redis and QStash resources use free plans. Redis automatic paid upgrades and production packs are disabled.
+- Live API checks passed for Redis room creation, safe invitation metadata, authenticated join, readiness, two legal moves, duplicate move safety, seat recovery, approved undo, draw agreement, and color-swapped rematch.
+- Two native authenticated WebSocket connections received snapshots and confirmed move pushes through Redis streams.
+- Unauthorized room reads returned 401 and the production test-fixture endpoint returned 404.
+- A separate 10-second timed game was left idle with every socket closed and no subsequent room API reads. After its deadline, a direct read-only Redis inspection found the persisted timeout result already finalized. This verifies actual QStash callback delivery independently of lazy read enforcement.
+- Production build and public HTTP 200 checks passed. GitHub Actions runs types, lint, unit tests, build, and browser tests against `pnpm start`, using the production bundle rather than a development server.
+
+## Remaining limits
+
+Free provider quotas apply. Local development tests use the file store; it is refused in normal production. The local file lock has basic crash recovery and is not a production persistence layer.
 
 Full perpetual-chase adjudication and 3D pieces are deliberately deferred, as specified in the brief. The UI and RULES.md identify the simplified chase rule.

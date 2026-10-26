@@ -35,3 +35,5 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Browser tests
         run: pnpm test:e2e
+        env:
+          E2E_SERVER_COMMAND: pnpm start

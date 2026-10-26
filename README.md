@@ -1,12 +1,14 @@
 # Xiangqi Online
 
+[Play the public app](https://xiangqi-online-one.vercel.app) · [Public GitHub repository](https://github.com/Fuzuto/xiangqi-online) · [Build checks](https://github.com/Fuzuto/xiangqi-online/actions/workflows/ci.yml)
+
 Private Chinese chess for two friends, with guest names, invite links, server-owned clocks, and seats that survive a refresh. The first release uses an SVG board and a shared TypeScript rules engine.
 
 **Rules:** WXF-based, simplified chase rule. Repeated checking is adjudicated; full perpetual-chase adjudication is deferred. Read [RULES.md](RULES.md) before competitive play.
 
 ## Run locally
 
-Use Node.js 22 or later and pnpm. From this folder:
+Use Node.js 24 and pnpm 11.25.0. From this folder:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -109,4 +111,4 @@ Successful room responses contain `{ "snapshot": ... }`, plus a raw token only w
 
 See [DEPLOY.md](DEPLOY.md) for GitHub, Vercel, Redis, QStash, and post-deployment checks. Configure secrets in your hosting account; never commit `.env.local`, expose server credentials through `NEXT_PUBLIC_` variables, or include authorization headers in logs.
 
-The project is ready to build locally. A working local build does not prove that a production Redis integration, scheduled callback, or WebSocket transport has been configured or tested.
+The public production app uses owned Upstash Redis and QStash integrations on their free plans. Redis automatic paid upgrades are disabled. Live release checks verified private-room play, native WebSocket updates over Redis, seat recovery, takebacks, draws, color-swapped rematches, and an idle timeout finalized by QStash without client polling. See [VERIFICATION.md](VERIFICATION.md) for the local and live checks.

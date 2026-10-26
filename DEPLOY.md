@@ -2,9 +2,11 @@
 
 Deploy this folder as its own Next.js project. Use separate Redis databases or namespaces for production and previews so preview tests cannot alter real matches.
 
+The current public release is [xiangqi-online-one.vercel.app](https://xiangqi-online-one.vercel.app), connected to [Fuzuto/xiangqi-online](https://github.com/Fuzuto/xiangqi-online). Production uses Node.js 24, Fluid compute, and free owned Upstash Redis/QStash resources in `iad1`.
+
 ## Validate the release
 
-With Node.js 22 or later and pnpm:
+With Node.js 24 and pnpm 11.25.0:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -18,7 +20,7 @@ pnpm build
 
 Review [RULES.md](RULES.md), including the simplified chase adjudication. This app does not claim tournament-complete WXF adjudication.
 
-## Create a private GitHub repository
+## Publish a public GitHub repository
 
 If the folder is not yet a repository:
 
@@ -28,10 +30,10 @@ git add .
 git commit -m "Build Xiangqi Online"
 ```
 
-Create an empty private repository named `xiangqi-online` in GitHub. Follow its existing-repository instructions to add the remote and push `main`. Alternatively, with the GitHub CLI already authenticated:
+For a separate copy, create an empty public repository named `xiangqi-online` in GitHub. Follow its existing-repository instructions to add the remote and push `main`. Alternatively, with the GitHub CLI already authenticated:
 
 ```sh
-gh repo create xiangqi-online --private --source=. --push
+gh repo create xiangqi-online --public --source=. --push
 ```
 
 Before pushing, inspect the staged files and confirm `.env.local`, generated room data, browser artifacts, and credentials are excluded. Commit the pnpm lockfile. The included GitHub Actions workflow checks types, lint, tests, and the production build. Require its check through branch protection for `main`.
@@ -91,4 +93,4 @@ Test preview deployments before merging. The Git integration deploys `main` to p
 
 ## Deployment access
 
-The connected Vercel integration must have access to the selected team. A project may be visible in a list while integration or deployment operations return a scope error. Complete the team consent link provided by the connector, then retry in the same connection. No one needs to paste account tokens into chat.
+The connected Vercel integration must have access to the selected team. A project may be visible in a list while integration or deployment operations return a scope error. Complete the team consent link provided by the connector, then retry in the same connection. No one needs to paste account tokens into chat. The current release's team access and Upstash provider terms are already configured; a new account may require its owner to accept provider terms before provisioning resources.
