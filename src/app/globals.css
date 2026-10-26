@@ -1605,7 +1605,7 @@ p {
     padding-top: 0;
   }
 }
-@media (min-width: 981px) and (max-width: 1190px) {
+@media (min-width: 981px) and (max-width: 1190px), (min-width: 981px) and (max-height: 760px) {
   .workspace {
     --table-width: min(1600px, calc((100dvh - 248px) * 0.9066));
   }

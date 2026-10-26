@@ -34,7 +34,7 @@ The main screen remains unchanged in composition. The updated production build p
 
 Retained True-black flat, seed 1192223736, with no redraws or new sample content. The screen still answers whose turn it is and where to move; its largest object is the playable board, with the river, palaces and red glyphs carrying its identity.
 
-Removed the 650px ceiling and sized the board from the available screen height, up to 1600px. On wide desktops both clocks share one row above it. At 981–1190px the clocks retain their separate rows so player names have room. The board, title, toolbar and footer share edges; the controls sit 24px from the board in a compact column, and their panels keep their natural heights. An initial two-column control layout produced a ragged-row warning and over-wide forms, so it was replaced with this centered group.
+Removed the 650px ceiling and sized the board from the available screen height, up to 1600px. On wide desktops both clocks share one row above it. At 981–1190px, or desktop heights up to 760px, the clocks retain their separate rows so player names have room. The board, title, toolbar and footer share edges; the controls sit 24px from the board in a compact column, and their panels keep their natural heights. An initial two-column control layout produced a ragged-row warning and over-wide forms, so it was replaced with this centered group.
 
 Measured production-build board widths, before → after:
 
@@ -47,4 +47,4 @@ Measured production-build board widths, before → after:
 
 Ten viewport checks from 390px through 3840px found no horizontal overflow; the 4K board measured 1600px. A real soldier move, legal-target feedback and board flipping passed at 1920px. The five-width inspector (1440, 1920, 2560, 768, 390) reported zero failures and zero warnings; all ten final fold/page images were reviewed. The existing seven-point critique still holds: data and clocks remain authoritative, missing values stay dashes, legal destinations retain their marks, and phone navigation folds without hiding the board. The CSS source warnings remain the two intentional overlay shadows; no checks were disabled.
 
-The board itself fits the tested desktop heights. Its toolbar and footer may require a short vertical scroll when the board fills the screen.
+Two additional short-window checks at 1440 × 700 and 1920 × 600 confirmed that both player names remain untruncated and the board plus both player rows fit vertically. The board itself fits the tested desktop heights. Its toolbar and footer may require a short vertical scroll when the board fills the screen.
