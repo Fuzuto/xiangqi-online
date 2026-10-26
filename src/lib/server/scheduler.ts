@@ -10,6 +10,14 @@ export function timeoutDeadline(room: RoomRecord) {
     : null;
 }
 
+export function nextCheckDeadline(room: RoomRecord) {
+  if (room.status !== 'playing') return null;
+  const deadlines = [timeoutDeadline(room), room.presenceCheckAt ?? null].filter(
+    (deadline): deadline is number => deadline !== null,
+  );
+  return deadlines.length ? Math.min(...deadlines) : null;
+}
+
 export function schedulingAvailable() {
   return Boolean(
     process.env.QSTASH_TOKEN && process.env.TIMEOUT_SECRET && process.env.APP_BASE_URL,
@@ -17,11 +25,11 @@ export function schedulingAvailable() {
 }
 
 export async function scheduleTimeout(room: RoomRecord) {
-  const deadline = timeoutDeadline(room);
+  const deadline = nextCheckDeadline(room);
   if (deadline === null) return;
   if (!schedulingAvailable()) {
     const localE2E = process.env.E2E_TEST_MODE === '1' && !process.env.VERCEL;
-    if (process.env.NODE_ENV === 'production' && !localE2E) {
+    if (process.env.NODE_ENV === 'production' && !localE2E && timeoutDeadline(room) !== null) {
       throw new RoomError(
         'Timed rooms need the timeout scheduler configured. Choose untimed for now.',
         'SCHEDULER_NOT_CONFIGURED',

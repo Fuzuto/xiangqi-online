@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { RoomService } from '../src/lib/server/service';
 import { LocalRoomStore, RedisRoomStore } from '../src/lib/server/store';
 import type { RoomStore } from '../src/lib/server/store';
@@ -43,6 +44,9 @@ async function command(
   ip: string,
 ) {
   const current = (await rooms.store.get(code))!;
+  const caller = Object.values(current.seats).find(
+    (seat) => seat?.tokenHash === createHash('sha256').update(token).digest('hex'),
+  );
   const data = body as Record<string, unknown>;
   const offerId =
     (kind === 'draw' || kind === 'undo') && data.action !== 'offer'
@@ -55,6 +59,7 @@ async function command(
       ...data,
       gameId: current.gameId,
       ...(kind === 'move' ? { branchId: current.branchId } : {}),
+      ...(kind === 'leave' ? { presenceId: caller?.presenceId ?? caller?.id } : {}),
       ...(offerId ? { offerId } : {}),
     },
     token,
@@ -217,12 +222,12 @@ describe('authoritative rooms and clocks', () => {
     expect((await rooms.read(code, red, 'host')).snapshot.version).toBe(expired.version);
   });
 
-  it('runs clocks while disconnected and permits a disconnect claim only after grace', async () => {
+  it('runs clocks during a disconnect and automatically forfeits an absent player after 30 seconds', async () => {
     await start({ mainTimeMs: 10_000 });
     now += 10_001;
     expect(await rooms.checkTimeout(code)).toEqual({ finalized: true });
     expect(store.records.get(code)!.result).toEqual({ winner: 'black', reason: 'timeout' });
-    const fresh = await rooms.create({ name: 'Claimant' }, 'fresh');
+    const fresh = await rooms.create({ name: 'Remaining' }, 'fresh');
     const partner = await rooms.join(fresh.snapshot.code, { name: 'Gone' }, undefined, 'partner');
     await command(
       rooms,
@@ -234,15 +239,196 @@ describe('authoritative rooms and clocks', () => {
     );
     await command(rooms, fresh.snapshot.code, 'ready', { ready: true }, fresh.token!, 'fresh');
     await command(rooms, fresh.snapshot.code, 'ready', { ready: true }, partner.token!, 'partner');
-    now += 89_999;
-    await expect(
-      command(rooms, fresh.snapshot.code, 'claim', {}, fresh.token!, 'fresh'),
-    ).rejects.toMatchObject({ code: 'GRACE_PERIOD' });
-    now += 1;
+    for (let beat = 0; beat < 2; beat++) {
+      now += 10_000;
+      expect(
+        (await rooms.read(fresh.snapshot.code, fresh.token!, 'fresh')).snapshot.result,
+      ).toBeNull();
+    }
+    now += 9_999;
     expect(
-      (await command(rooms, fresh.snapshot.code, 'claim', {}, fresh.token!, 'fresh')).snapshot
-        .result,
-    ).toEqual({ winner: 'red', reason: 'disconnect' });
+      (await rooms.read(fresh.snapshot.code, fresh.token!, 'fresh')).snapshot.result,
+    ).toBeNull();
+    now += 1;
+    expect((await rooms.read(fresh.snapshot.code, fresh.token!, 'fresh')).snapshot.result).toEqual({
+      winner: 'red',
+      reason: 'disconnect',
+    });
+  });
+
+  it('allows a disconnected player to restore their seat before the 30-second deadline', async () => {
+    await start({ clockMode: 'untimed' });
+    const started = now;
+    now += 15_000;
+    const away = (await rooms.read(code, red, 'host')).snapshot;
+    expect(away.seats.black).toMatchObject({
+      connected: false,
+      disconnectDeadline: started + 30_000,
+    });
+    now += 10_000;
+    const restored = (await rooms.join(code, {}, black, 'guest')).snapshot;
+    expect(restored.result).toBeNull();
+    expect(restored.seats.black).toMatchObject({ connected: true, disconnectDeadline: null });
+    now += 10_000;
+    expect((await rooms.read(code, red, 'host')).snapshot.result).toBeNull();
+  });
+
+  it('marks an explicit departure immediately and only token restoration cancels it', async () => {
+    await start({ clockMode: 'untimed' });
+    now += 1_000;
+    const left = (await action('leave', {}, black)).snapshot;
+    expect(left.seats.black).toMatchObject({ connected: false, disconnectDeadline: now + 30_000 });
+    now += 2_000;
+    const latePoll = (await rooms.read(code, black, 'guest')).snapshot;
+    expect(latePoll.seats.black?.connected).toBe(false);
+    expect(latePoll.seats.black?.disconnectDeadline).toBe(left.seats.black?.disconnectDeadline);
+    const restored = (await rooms.join(code, {}, black, 'guest')).snapshot;
+    expect(restored.seats.black).toMatchObject({ connected: true, disconnectDeadline: null });
+  });
+
+  it('ignores a delayed departure from before the seat was restored', async () => {
+    const original = await start({ clockMode: 'untimed' });
+    const oldPresenceId = original.you.presenceId;
+    const restored = (await rooms.join(code, {}, black, 'guest')).snapshot;
+    expect(restored.you.presenceId).not.toBe(oldPresenceId);
+    const delayed = await rooms.action(
+      code,
+      'leave',
+      {
+        gameId: original.gameId,
+        presenceId: oldPresenceId,
+      },
+      black,
+      'guest',
+    );
+    expect(delayed.snapshot.seats.black?.connected).toBe(true);
+    expect(store.records.get(code)!.seats.black?.leftAt).toBeNull();
+    const currentLeave = await rooms.action(
+      code,
+      'leave',
+      {
+        gameId: original.gameId,
+        presenceId: restored.you.presenceId,
+      },
+      black,
+      'guest',
+    );
+    expect(currentLeave.snapshot.seats.black?.connected).toBe(false);
+    await expect(
+      rooms.action(code, 'leave', { gameId: original.gameId }, black, 'guest'),
+    ).rejects.toThrow();
+  });
+
+  it('uses a stable presence identifier for legacy seats until their next restoration', async () => {
+    await start({ clockMode: 'untimed' });
+    const seat = store.records.get(code)!.seats.black!;
+    delete seat.presenceId;
+    const legacy = (await rooms.read(code, black, 'guest')).snapshot;
+    expect(legacy.you.presenceId).toBe(seat.id);
+    const laterRead = (await rooms.read(code, black, 'guest')).snapshot;
+    expect(laterRead.you.presenceId).toBe(legacy.you.presenceId);
+    const departed = (
+      await rooms.action(
+        code,
+        'leave',
+        {
+          gameId: legacy.gameId,
+          presenceId: legacy.you.presenceId,
+        },
+        black,
+        'guest',
+      )
+    ).snapshot;
+    expect(departed.seats.black?.connected).toBe(false);
+    const restored = (await rooms.join(code, {}, black, 'guest')).snapshot;
+    expect(restored.you.presenceId).not.toBe(legacy.you.presenceId);
+    expect(restored.seats.black?.connected).toBe(true);
+  });
+
+  it('does not let a player restore their seat after they already lost by disconnect', async () => {
+    await start({ clockMode: 'untimed' });
+    for (let beat = 0; beat < 2; beat++) {
+      now += 10_000;
+      await rooms.read(code, red, 'host');
+    }
+    now += 10_000;
+    const lateReturn = (await rooms.join(code, {}, black, 'guest')).snapshot;
+    expect(lateReturn.result).toEqual({ winner: 'red', reason: 'disconnect' });
+    expect(lateReturn.status).toBe('finished');
+    expect((await rooms.read(code, red, 'host')).snapshot.result).toEqual(lateReturn.result);
+  });
+
+  it('does not award a disconnect win when both are away and grants fresh grace on return', async () => {
+    await start({ clockMode: 'untimed' });
+    now += 31_000;
+    expect(await rooms.checkTimeout(code)).toEqual({ finalized: false });
+    expect(store.records.get(code)!.result).toBeNull();
+    const returned = (await rooms.join(code, {}, red, 'host')).snapshot;
+    expect(returned.result).toBeNull();
+    expect(returned.seats.black?.disconnectDeadline).toBe(now + 30_000);
+    for (let beat = 0; beat < 2; beat++) {
+      now += 10_000;
+      expect((await rooms.read(code, red, 'host')).snapshot.result).toBeNull();
+    }
+    now += 10_000;
+    expect((await rooms.read(code, red, 'host')).snapshot.result).toEqual({
+      winner: 'red',
+      reason: 'disconnect',
+    });
+  });
+
+  it('adjudicates an untimed disconnect through the scheduled callback exactly once', async () => {
+    await start({ clockMode: 'untimed' });
+    for (let beat = 0; beat < 2; beat++) {
+      now += 10_000;
+      await rooms.read(code, red, 'host');
+    }
+    now += 10_000;
+    expect(await rooms.checkTimeout(code)).toEqual({ finalized: true });
+    const settled = structuredClone(store.records.get(code));
+    expect(settled?.result).toEqual({ winner: 'red', reason: 'disconnect' });
+    expect(await rooms.checkTimeout(code)).toEqual({ finalized: false });
+    expect(store.records.get(code)).toEqual(settled);
+  });
+
+  it('uses the earlier disconnect deadline instead of a later clock timeout', async () => {
+    await start({ mainTimeMs: 40_000 });
+    await move(red, 0, 54, 45);
+    for (let beat = 0; beat < 3; beat++) {
+      now += 10_000;
+      await rooms.read(code, red, 'host');
+    }
+    expect(store.records.get(code)!.result).toEqual({ winner: 'red', reason: 'disconnect' });
+  });
+
+  it('keeps waiting-room departures out of result adjudication and blocks start without both players', async () => {
+    await action('leave', {}, black);
+    now += 31_000;
+    const waiting = (await rooms.read(code, red, 'host')).snapshot;
+    expect(waiting.status).toBe('waiting');
+    expect(waiting.result).toBeNull();
+    expect(await rooms.checkTimeout(code)).toEqual({ finalized: false });
+    await action('ready', { ready: true }, red);
+    await expect(action('ready', { ready: true }, black)).rejects.toMatchObject({
+      code: 'PLAYER_DISCONNECTED',
+    });
+  });
+
+  it('rolls scheduled presence checks forward without scheduling on every heartbeat', async () => {
+    await start({ clockMode: 'untimed' });
+    expect(schedule).toHaveBeenCalledTimes(1);
+    for (let beat = 0; beat < 2; beat++) {
+      now += 10_000;
+      await rooms.read(code, red, 'host');
+      await rooms.read(code, black, 'guest');
+    }
+    expect(schedule).toHaveBeenCalledTimes(1);
+    now += 10_000;
+    await rooms.checkTimeout(code);
+    expect(schedule).toHaveBeenCalledTimes(2);
+    expect(store.records.get(code)!.presenceCheckAt).toBe(now + 20_000);
+    await rooms.checkTimeout(code);
+    expect(schedule).toHaveBeenCalledTimes(2);
   });
 
   it('makes double taps and simultaneous stale commands harmless', async () => {
@@ -337,7 +523,7 @@ describe('authoritative rooms and clocks', () => {
   });
 
   it('does not commit a move or start a clock when scheduling the new deadline fails', async () => {
-    await start();
+    await start({ mainTimeMs: 10_000 });
     const before = structuredClone(store.records.get(code));
     schedule.mockRejectedValueOnce(new Error('offline'));
     now += 100;
@@ -494,7 +680,12 @@ describe('storage and scheduled delivery boundaries', () => {
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/v2/publish/https://xiangqi.example/api/internal/timeout-check');
     const headers = options.headers as Record<string, string>;
-    expect(headers['Upstash-Not-Before']).toBe(String(Math.ceil((now + 600_000) / 1_000)));
+    const presenceDeadline = Math.min(
+      ...Object.values(store.records.get(host.snapshot.code)!.seats)
+        .filter((seat) => seat !== null)
+        .map((seat) => seat.lastSeenAt + 30_000),
+    );
+    expect(headers['Upstash-Not-Before']).toBe(String(Math.ceil(presenceDeadline / 1_000)));
     expect(headers['Upstash-Forward-Authorization']).toBe('Bearer callback-secret');
     expect(options.body).toBe(JSON.stringify({ code: host.snapshot.code }));
     expect(options.body).not.toContain(host.token!);

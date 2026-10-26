@@ -6,20 +6,26 @@ import {
   ABORT_WINDOW_MS,
   APPLY_INCREMENT_ON_FIRST_MOVE,
   DEFAULT_SETTINGS,
-  DISCONNECT_AFTER_MS,
   DISCONNECT_GRACE_MS,
   DRAW_OFFER_INTERVAL_PLIES,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
   RoomError,
   clockRemaining,
+  disconnectDeadline,
   expiryMilliseconds,
+  seatConnected,
   startingClocks,
 } from './model';
 import type { RoomRecord, SeatRecord } from './model';
 import type { RoomAction, RoomResponse, RoomSettings, RoomSnapshot } from './types';
 import type { RoomStore } from './store';
-import { scheduleTimeout, schedulingAvailable, timeoutDeadline } from './scheduler';
+import {
+  nextCheckDeadline,
+  scheduleTimeout,
+  schedulingAvailable,
+  timeoutDeadline,
+} from './scheduler';
 
 const codeSchema = z.string().regex(/^[2-9A-HJ-NP-Z]{10}$/);
 const nameSchema = z
@@ -112,6 +118,7 @@ function newSeat(name: string, now: number) {
   const token = randomBytes(32).toString('hex');
   const seat: SeatRecord = {
     id: randomUUID(),
+    presenceId: randomUUID(),
     displayName: name,
     tokenHash: digest(token),
     ready: false,
@@ -134,16 +141,51 @@ function finish(room: RoomRecord, winner: Color | null, reason: string, now: num
   room.result = { winner, reason };
   room.clocks.turnStartedAt = null;
   room.clocks.turnRemainingMs = null;
+  room.presenceCheckAt = null;
   clearOffers(room);
 }
 
 export function enforceTimeout(room: RoomRecord, now: number) {
-  const deadline = timeoutDeadline(room);
-  if (deadline !== null && now >= deadline) {
+  if (room.status !== 'playing') return false;
+  const clockDeadline = timeoutDeadline(room);
+  const absent = (['red', 'black'] as const).find((color) => {
+    const seat = room.seats[color],
+      opponent = room.seats[opposite(color)];
+    return (
+      seat &&
+      opponent &&
+      !seatConnected(seat, now) &&
+      now >= disconnectDeadline(seat) &&
+      seatConnected(opponent, now)
+    );
+  });
+  const absenceDeadline = absent ? disconnectDeadline(room.seats[absent]!) : null;
+  if (
+    absenceDeadline !== null &&
+    (clockDeadline === null || absenceDeadline < clockDeadline) &&
+    now >= absenceDeadline
+  ) {
+    finish(room, opposite(absent!), 'disconnect', now);
+    return true;
+  }
+  if (clockDeadline !== null && now >= clockDeadline) {
     finish(room, opposite(room.game.turn), 'timeout', now);
     return true;
   }
   return false;
+}
+
+function updatePresenceCheck(room: RoomRecord, now: number) {
+  if (room.status !== 'playing') {
+    room.presenceCheckAt = null;
+    return;
+  }
+  if (room.presenceCheckAt != null && room.presenceCheckAt > now) return;
+  const deadlines = Object.values(room.seats)
+    .filter((seat): seat is SeatRecord => seat !== null)
+    .map(disconnectDeadline)
+    .filter((deadline) => deadline > now);
+  room.presenceCheckAt = deadlines.length ? Math.min(...deadlines) : null;
 }
 
 export interface ServiceOptions {
@@ -235,7 +277,8 @@ export class RoomService {
             displayName: item.displayName,
             ready: item.ready,
             lastSeenAt: item.lastSeenAt,
-            connected: now - item.lastSeenAt <= DISCONNECT_AFTER_MS,
+            connected: seatConnected(item, now),
+            disconnectDeadline: seatConnected(item, now) ? null : disconnectDeadline(item),
           }
         : null;
     return {
@@ -249,7 +292,12 @@ export class RoomService {
       status: room.status,
       settings: room.settings,
       seats: { red: publicSeat(room.seats.red), black: publicSeat(room.seats.black) },
-      you: { id: seat.id, color, isHost: seat.id === room.hostId },
+      you: {
+        id: seat.id,
+        color,
+        isHost: seat.id === room.hostId,
+        presenceId: seat.presenceId ?? seat.id,
+      },
       game: room.game,
       moveLog: room.moveLog,
       clocks: room.clocks,
@@ -266,22 +314,42 @@ export class RoomService {
     token: string,
     mutate: (room: RoomRecord, color: Color, now: number) => void,
     touchPresence = true,
+    restorePresence = false,
   ): Promise<RoomResponse> {
     for (let attempt = 0; attempt < 12; attempt++) {
       const now = this.now();
       const room = await this.load(code, now);
       const { color, seat } = seatForToken(room, token);
       const previousVersion = room.version;
-      const previousDeadline = timeoutDeadline(room);
+      const previousDeadline = nextCheckDeadline(room);
       const before = JSON.stringify(room);
       const timedOut = enforceTimeout(room, now);
-      if (touchPresence && now - seat.lastSeenAt >= 1_500) seat.lastSeenAt = now;
+      if (restorePresence) seat.presenceId = randomUUID();
+      if (touchPresence && (seat.leftAt == null || restorePresence)) {
+        // If both devices were gone, the first return starts a fresh grace period, not a free win.
+        if (
+          !timedOut &&
+          room.status === 'playing' &&
+          Object.values(room.seats).every(
+            (item) => item && !seatConnected(item, now) && disconnectDeadline(item) <= now,
+          )
+        ) {
+          const opponent = room.seats[opposite(color)];
+          if (opponent) opponent.graceUntil = now + DISCONNECT_GRACE_MS;
+        }
+        if (now - seat.lastSeenAt >= 1_500 || seat.leftAt != null) seat.lastSeenAt = now;
+        if (restorePresence || seat.leftAt == null) {
+          seat.leftAt = null;
+          seat.graceUntil = null;
+        }
+      }
       if (!timedOut) mutate(room, color, now);
+      updatePresenceCheck(room, now);
       if (JSON.stringify(room) === before) return { snapshot: this.snapshot(room, token, now) };
       room.expiresAt = now + expiryMilliseconds();
       room.version++;
       // A failed scheduling attempt must not commit a new running deadline.
-      if (timeoutDeadline(room) !== previousDeadline) await this.schedule(room);
+      if (nextCheckDeadline(room) !== previousDeadline) await this.schedule(room);
       if (await this.store.compareAndSet(code, previousVersion, room))
         return { snapshot: this.snapshot(room, token, now) };
     }
@@ -340,7 +408,7 @@ export class RoomService {
       .parse(input);
     token ??= parsed.token;
     await this.limit(ip, 'join', code);
-    if (token) return this.transact(code, token, () => {});
+    if (token) return this.transact(code, token, () => {}, true, true);
     const name = nameSchema.parse(parsed.name);
     const now = this.now();
     const added = newSeat(name, now);
@@ -388,6 +456,14 @@ export class RoomService {
     return this.transact(code, token, (room, color, now) => {
       // Delayed commands from an earlier game or an undone branch must never affect this one.
       if (room.gameId !== gameId || (action === 'move' && room.branchId !== branchId)) return;
+      if (action === 'leave') {
+        const seat = room.seats[color]!;
+        if ((data as { presenceId: string }).presenceId !== (seat.presenceId ?? seat.id)) return;
+        seat.leftAt = now;
+        seat.graceUntil = now + DISCONNECT_GRACE_MS;
+        for (const item of Object.values(room.seats)) if (item) item.ready = false;
+        return;
+      }
       if (action === 'settings')
         return this.changeSettings(room, color, data as Partial<RoomSettings>);
       if (action === 'ready')
@@ -408,6 +484,7 @@ export class RoomService {
         room.result = null;
         room.clocks.turnStartedAt = null;
         room.clocks.turnRemainingMs = null;
+        room.presenceCheckAt = null;
         clearOffers(room);
         return;
       }
@@ -415,15 +492,12 @@ export class RoomService {
         throw new RoomError('The game is not in progress.', 'GAME_NOT_PLAYING', 409);
       if (action === 'resign') return finish(room, opposite(color), 'resignation', now);
       if (action === 'claim') {
-        const opponent = room.seats[opposite(color)];
-        if (!opponent || now - opponent.lastSeenAt < DISCONNECT_GRACE_MS) {
-          throw new RoomError(
-            'A disconnected player has 90 seconds to return before a win can be claimed.',
-            'GRACE_PERIOD',
-            409,
-          );
-        }
-        return finish(room, color, 'disconnect', now);
+        if (enforceTimeout(room, now)) return;
+        throw new RoomError(
+          'The game ends automatically after a player has been away for 30 seconds.',
+          'GRACE_PERIOD',
+          409,
+        );
       }
       if (action === 'draw') {
         const offer = data as z.infer<typeof offerSchema>;
@@ -437,6 +511,8 @@ export class RoomService {
   }
 
   private parseAction(action: RoomAction, input: unknown) {
+    if (action === 'leave')
+      return z.object({ presenceId: z.string().uuid() }).strict().parse(input);
     if (action === 'settings') return settingsSchema.parse(input);
     if (action === 'move') return moveSchema.parse(input);
     if (action === 'ready') return readySchema.parse(input);
@@ -478,10 +554,7 @@ export class RoomService {
     }
     seat.ready = true;
     if (room.seats.red?.ready && room.seats.black?.ready) {
-      if (
-        now - room.seats.red.lastSeenAt > DISCONNECT_AFTER_MS ||
-        now - room.seats.black.lastSeenAt > DISCONNECT_AFTER_MS
-      ) {
+      if (!seatConnected(room.seats.red, now) || !seatConnected(room.seats.black, now)) {
         throw new RoomError('Both players must be connected to start.', 'PLAYER_DISCONNECTED', 409);
       }
       if (room.settings.hostSide === 'random')
@@ -653,6 +726,7 @@ export class RoomService {
     clearOffers(room);
     room.moveCounts = { red: 0, black: 0 };
     room.undoState = null;
+    room.presenceCheckAt = null;
     room.lastDrawOfferAt = { red: -DRAW_OFFER_INTERVAL_PLIES, black: -DRAW_OFFER_INTERVAL_PLIES };
     room.processedMoves = {};
   }
@@ -664,9 +738,21 @@ export class RoomService {
       const room = await this.store.get(code);
       if (!room || room.expiresAt <= now) return { finalized: false };
       const version = room.version;
-      if (!enforceTimeout(room, now)) return { finalized: false };
+      const previousDeadline = nextCheckDeadline(room);
+      const before = JSON.stringify(room);
+      const finalized = enforceTimeout(room, now);
+      updatePresenceCheck(room, now);
+      // A rolling check follows heartbeats without scheduling a job for every heartbeat.
+      if (
+        !finalized &&
+        room.status === 'playing' &&
+        previousDeadline !== null &&
+        previousDeadline <= now
+      )
+        await this.schedule(room);
+      if (JSON.stringify(room) === before) return { finalized: false };
       room.version++;
-      if (await this.store.compareAndSet(code, version, room)) return { finalized: true };
+      if (await this.store.compareAndSet(code, version, room)) return { finalized };
     }
     throw new RoomError('The room is busy. Please retry.', 'ROOM_BUSY', 409);
   }

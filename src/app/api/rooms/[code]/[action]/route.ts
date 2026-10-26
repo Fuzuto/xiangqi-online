@@ -14,6 +14,7 @@ const actionSchema = z.enum([
   'rematch',
   'abort',
   'claim',
+  'leave',
 ]);
 
 export async function POST(

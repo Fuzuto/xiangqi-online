@@ -24,6 +24,7 @@ export interface PublicSeat {
   ready: boolean;
   lastSeenAt: number;
   connected: boolean;
+  disconnectDeadline: number | null;
 }
 
 export interface GameResult {
@@ -58,7 +59,7 @@ export interface RoomSnapshot {
   status: RoomStatus;
   settings: RoomSettings;
   seats: Record<Color, PublicSeat | null>;
-  you: { id: string; color: Color; isHost: boolean };
+  you: { id: string; color: Color; isHost: boolean; presenceId: string };
   game: GameState;
   moveLog: TimedMoveRecord[];
   clocks: RoomClocks;
@@ -75,4 +76,13 @@ export interface RoomResponse {
 }
 
 export type RoomAction =
-  'settings' | 'ready' | 'move' | 'resign' | 'draw' | 'undo' | 'rematch' | 'abort' | 'claim';
+  | 'settings'
+  | 'ready'
+  | 'move'
+  | 'resign'
+  | 'draw'
+  | 'undo'
+  | 'rematch'
+  | 'abort'
+  | 'claim'
+  | 'leave';

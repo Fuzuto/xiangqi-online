@@ -11,7 +11,7 @@ import type {
 export const ROOM_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 export const ROOM_CODE_LENGTH = 10;
 export const DISCONNECT_AFTER_MS = 12_000;
-export const DISCONNECT_GRACE_MS = 90_000;
+export const DISCONNECT_GRACE_MS = 30_000;
 export const ABORT_WINDOW_MS = 30_000;
 export const APPLY_INCREMENT_ON_FIRST_MOVE = false;
 export const DRAW_OFFER_INTERVAL_PLIES = 20;
@@ -32,6 +32,9 @@ export interface SeatRecord {
   ready: boolean;
   connectedAt: number;
   lastSeenAt: number;
+  presenceId?: string;
+  leftAt?: number | null;
+  graceUntil?: number | null;
 }
 
 export interface UndoState {
@@ -62,6 +65,15 @@ export interface RoomRecord {
   lastDrawOfferAt: Record<Color, number>;
   processedMoves: Record<string, number>;
   undoState: UndoState | null;
+  presenceCheckAt?: number | null;
+}
+
+export function seatConnected(seat: SeatRecord, now: number) {
+  return seat.leftAt == null && now - seat.lastSeenAt <= DISCONNECT_AFTER_MS;
+}
+
+export function disconnectDeadline(seat: SeatRecord) {
+  return seat.graceUntil ?? (seat.leftAt ?? seat.lastSeenAt) + DISCONNECT_GRACE_MS;
 }
 
 export class RoomError extends Error {
