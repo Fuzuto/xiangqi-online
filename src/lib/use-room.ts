@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RoomAction, RoomResponse, RoomSnapshot } from './server/types';
+import type { InvitePreview } from './invite-types';
 
 export function useRoom() {
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
@@ -12,8 +13,13 @@ export function useRoom() {
     'local' | 'connecting' | 'live' | 'polling' | 'offline'
   >('local');
   const [clockOffset, setClockOffset] = useState(0);
+  const [invitation, setInvitation] = useState<string | null>(null);
+  const [invitePreview, setInvitePreview] = useState<InvitePreview | null>(null);
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteError, setInviteError] = useState('');
   const tokenRef = useRef('');
   const activeCode = useRef('');
+  const needsRestore = useRef('');
   const accept = useCallback((next: RoomSnapshot, started = Date.now()) => {
     setClockOffset(next.serverNow - (started + Date.now()) / 2);
     setSnapshot((previous) =>
@@ -29,10 +35,12 @@ export function useRoom() {
       if (token) {
         tokenRef.current = token;
         activeCode.current = requested;
+        needsRestore.current = requested;
         setCode(requested);
         setConnection('connecting');
-      }
+      } else setInvitation(requested);
     } catch {
+      setInvitation(requested);
       setError('Enable browser storage to save and restore your seat.');
     }
   }, []);
@@ -58,16 +66,49 @@ export function useRoom() {
     [accept],
   );
   useEffect(() => {
+    if (!invitation) return;
+    const controller = new AbortController();
+    setInviteLoading(true);
+    setInvitePreview(null);
+    setInviteError('');
+    void (async () => {
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(invitation)}/invite`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const result = (await response.json()) as { invite: InvitePreview; error?: string };
+        if (!response.ok) throw new Error(result.error ?? 'This invitation could not be opened.');
+        if (!controller.signal.aborted) setInvitePreview(result.invite);
+      } catch (error) {
+        if (!controller.signal.aborted)
+          setInviteError(
+            error instanceof Error ? error.message : 'This invitation could not be opened.',
+          );
+      } finally {
+        if (!controller.signal.aborted) setInviteLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [invitation]);
+  useEffect(() => {
     if (!code) return;
     let disposed = false;
     let socket: WebSocket | null = null;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     let backoff = 1500;
     let lastVersion = 0;
+    let restoring = false;
     async function poll() {
+      if (restoring) return;
       try {
-        const result = await request(`/api/rooms/${encodeURIComponent(code)}`);
+        const restoringSeat = needsRestore.current === code;
+        restoring = restoringSeat;
+        const result = restoringSeat
+          ? await request(`/api/rooms/${encodeURIComponent(code)}/join`, {})
+          : await request(`/api/rooms/${encodeURIComponent(code)}`);
         if (disposed) return;
+        needsRestore.current = '';
         lastVersion = result.snapshot.version;
         setError('');
         setConnection(socket?.readyState === WebSocket.OPEN ? 'live' : 'polling');
@@ -76,6 +117,8 @@ export function useRoom() {
           setError(error instanceof Error ? error.message : 'Connection lost. Retrying…');
           setConnection('offline');
         }
+      } finally {
+        restoring = false;
       }
     }
     function connect() {
@@ -148,6 +191,9 @@ export function useRoom() {
       accept(result.snapshot);
       setCode(result.snapshot.code);
       setInviteCode(result.snapshot.code);
+      setInvitation(null);
+      setInvitePreview(null);
+      setInviteError('');
       setConnection('connecting');
       window.history.replaceState({}, '', `?room=${encodeURIComponent(result.snapshot.code)}`);
     } catch (error) {
@@ -175,16 +221,38 @@ export function useRoom() {
       setBusy(false);
     }
   }
-  function leave() {
-    activeCode.current = '';
-    setCode('');
-    setSnapshot(null);
-    setInviteCode('');
-    setConnection('local');
-    setError('');
-    tokenRef.current = '';
-    window.history.replaceState({}, '', '/');
-  }
+  const leave = useCallback(
+    (notify = true) => {
+      const leavingCode = code;
+      const token = tokenRef.current;
+      const gameId = snapshot?.gameId;
+      const presenceId = snapshot?.you.presenceId;
+      activeCode.current = '';
+      needsRestore.current = '';
+      setCode('');
+      setSnapshot(null);
+      setInviteCode('');
+      setInvitation(null);
+      setInvitePreview(null);
+      setInviteError('');
+      setConnection('local');
+      setError('');
+      tokenRef.current = '';
+      window.history.replaceState({}, '', '/');
+      if (notify && leavingCode && token && gameId && presenceId) {
+        // A departure is independent of UI cleanup; an in-flight heartbeat cannot restore it.
+        void fetch(`/api/rooms/${encodeURIComponent(leavingCode)}/leave`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ gameId, presenceId }),
+          keepalive: true,
+        }).catch(() => {
+          /* Missing heartbeats still enforce the departure deadline. */
+        });
+      }
+    },
+    [code, snapshot?.gameId, snapshot?.you.presenceId],
+  );
   return {
     snapshot,
     code,
@@ -195,6 +263,10 @@ export function useRoom() {
     busy,
     connection,
     clockOffset,
+    invitation,
+    invitePreview,
+    inviteLoading,
+    inviteError,
     enter,
     action,
     leave,

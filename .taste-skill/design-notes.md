@@ -21,3 +21,11 @@ Final inspection used the production build at 1440, 768, and 390 pixels: 0 failu
 7. At 390px the navigation folds, the product remains named, and the whole board fits the page width. Room setup, actions, and the move list follow it. The top Play online action focuses the room form when it is below the fold.
 
 The source lint warnings are intentional: shadows belong to the floating sound prompt and open mobile menu; zero padding formats clocks; em dashes occur in the title/clock notation. The final browser inspector has no warnings. No inspector rules were disabled. No photographs, generated raster images, sample people, or placeholder data need replacing.
+
+## Join and reset update
+
+The existing True-black flat direction is retained. Opening an invite now uses a native modal with the host's real name, side and clock settings, an autofocus name field, and one join action. Desktop, tablet and 390px phone screenshots were reviewed; the dialog fits all three without horizontal overflow, and Escape returns home.
+
+Initial setup, local reset, rematch and return from a disconnect result place the pieces with staggered translation, scale and opacity. Placement completes in roughly 0.54 seconds, stays inside the board, and does not replay on presence polls. Reduced-motion disables placement travel entirely.
+
+The main screen remains unchanged in composition. The updated production build passed the 1440px/768px/390px inspector with zero failures and zero warnings, and all six updated page screenshots were reviewed. No new imagery or placeholder product content was introduced; River and Mountain appear only in automated test fixtures and review screenshots.

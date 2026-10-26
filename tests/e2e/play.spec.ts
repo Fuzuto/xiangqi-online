@@ -2,6 +2,7 @@ import { expect, test, type Browser, type BrowserContext, type Page } from '@pla
 import type { RoomResponse, RoomSnapshot } from '../../src/lib/server/types';
 
 type Player = { page: Page; context: BrowserContext; token: string; code: string };
+type PlacementEvent = { name: string; delay: string };
 const baseURL = process.env.BASE_URL ?? `http://127.0.0.1:${process.env.E2E_PORT ?? '3000'}`;
 
 async function snapshot(player: Player): Promise<RoomSnapshot> {
@@ -14,7 +15,7 @@ async function snapshot(player: Player): Promise<RoomSnapshot> {
 
 async function pair(browser: Browser): Promise<{ host: Player; guest: Player }> {
   const hostContext = await browser.newContext({ baseURL });
-  const guestContext = await browser.newContext({ baseURL });
+  const guestContext = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
   const hostPage = await hostContext.newPage();
   const guestPage = await guestContext.newPage();
   await hostPage.goto('/');
@@ -31,21 +32,53 @@ async function pair(browser: Browser): Promise<{ host: Player; guest: Player }> 
   await expect(hostPage.getByTestId('room-code')).toHaveText(code);
 
   await guestPage.goto(`/?room=${code}`);
-  await guestPage.getByLabel('Your name', { exact: true }).fill('Mountain');
-  await expect(guestPage.getByLabel('Room code', { exact: true })).toHaveValue(code);
+  const invitation = guestPage.getByRole('dialog', { name: 'Join room', exact: true });
+  await expect(invitation).toBeVisible();
+  await expect(invitation.getByText('River', { exact: true })).toBeVisible();
+  await invitation.getByLabel('Your name', { exact: true }).fill('Mountain');
   const joined = guestPage.waitForResponse((item) =>
     item.url().endsWith(`/api/rooms/${code}/join`),
   );
-  await guestPage.getByRole('button', { name: 'Join room', exact: true }).click();
+  await invitation.getByRole('button', { name: 'Join room', exact: true }).click();
   const joinResponse = await joined;
   expect(joinResponse.ok()).toBe(true);
   const guestData = (await joinResponse.json()) as RoomResponse;
   expect(guestData.token).toBeTruthy();
+  await expect(invitation).toHaveCount(0);
   await expect(hostPage.getByRole('button', { name: 'Ready to play', exact: true })).toBeEnabled();
   return {
     host: { page: hostPage, context: hostContext, token: hostData.token!, code },
     guest: { page: guestPage, context: guestContext, token: guestData.token!, code },
   };
+}
+
+async function recordPlacements(page: Page) {
+  await page.evaluate(() => {
+    const observed = window as Window & { placementEvents?: PlacementEvent[] };
+    observed.placementEvents = [];
+    document.addEventListener('animationstart', (event) => {
+      if (event.target instanceof Element && event.target.matches('.piece-reset')) {
+        observed.placementEvents!.push({
+          name: event.animationName,
+          delay: getComputedStyle(event.target).animationDelay,
+        });
+      }
+    });
+  });
+}
+
+async function placementEvents(page: Page): Promise<PlacementEvent[]> {
+  return page.evaluate(
+    () => (window as Window & { placementEvents?: PlacementEvent[] }).placementEvents ?? [],
+  );
+}
+
+async function expectPlacementAnimation(page: Page) {
+  await expect.poll(async () => (await placementEvents(page)).length).toBe(32);
+  const placements = await placementEvents(page);
+  expect(new Set(placements.map((event) => event.delay)).size).toBeGreaterThan(1);
+  expect(placements.every((event) => event.name !== 'none')).toBe(true);
+  await expect(page.locator('.piece-face')).toHaveCount(32);
 }
 
 async function start(host: Player, guest: Player, allowUndo = false) {
@@ -136,6 +169,7 @@ test('two friends play a timed game, recover seats and pending offers, and remat
     await expect(
       host.page.getByRole('heading', { name: 'A drawn game', exact: true }),
     ).toBeVisible();
+    await recordPlacements(host.page);
     await host.page.getByRole('button', { name: 'Request rematch', exact: true }).click();
     await guest.page.getByRole('button', { name: 'Accept rematch', exact: true }).click();
     await expect(
@@ -147,6 +181,12 @@ test('two friends play a timed game, recover seats and pending offers, and remat
     expect(rematch.game.moves).toHaveLength(0);
     expect(rematch.seats.red?.ready).toBe(false);
     expect(rematch.seats.black?.ready).toBe(false);
+    await expectPlacementAnimation(host.page);
+    await host.page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/rooms/${host.code}`) && response.request().method() === 'GET',
+    );
+    expect(await placementEvents(host.page)).toHaveLength(32);
     await host.page.getByRole('button', { name: 'Ready to play', exact: true }).click();
     await guest.page.getByRole('button', { name: 'Ready to play', exact: true }).click();
     await expect(
@@ -176,7 +216,13 @@ test('an approved takeback restores the move history and active clock', async ({
       host.page.getByRole('heading', { name: 'Red to move', exact: true }),
     ).toBeVisible();
     await host.page.getByRole('button', { name: 'Takeback', exact: true }).click();
+    const accepted = guest.page.waitForResponse((response) =>
+      response.url().endsWith(`/api/rooms/${guest.code}/undo`),
+    );
     await guest.page.getByRole('button', { name: 'Accept takeback', exact: true }).click();
+    const acceptedResponse = await accepted;
+    expect(acceptedResponse.ok()).toBe(true);
+    expect(((await acceptedResponse.json()) as RoomResponse).snapshot.game.moves).toHaveLength(1);
     await expect.poll(async () => (await snapshot(host)).game.moves.length).toBe(1);
     const restored = await snapshot(host);
     expect(restored.game.board).toEqual(afterFirst.game.board);
@@ -255,6 +301,94 @@ test('local board supports keyboard moves and remembers appearance preferences',
   await expect(page.locator('.piece-symbol').first()).toBeVisible();
 });
 
+test('reset quickly places every piece, clears the played move, and remains playable', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page.locator('[data-square="54"]').click();
+  await page.locator('[data-square="45"]').click();
+  await expect(page.getByRole('heading', { name: 'Black to move', exact: true })).toBeVisible();
+  await recordPlacements(page);
+  await page.getByRole('button', { name: 'New local game', exact: true }).click();
+  await page.getByRole('button', { name: 'Start new game', exact: true }).click();
+  await expectPlacementAnimation(page);
+  await expect(page.getByRole('heading', { name: 'Red to move', exact: true })).toBeVisible();
+  await expect(page.locator('[data-square="54"]')).toHaveAttribute(
+    'aria-label',
+    'Red soldier at a3',
+  );
+  await expect(page.locator('[data-square="45"]')).toHaveAttribute(
+    'aria-label',
+    'Empty square at a4',
+  );
+  await expect(page.getByLabel('Move list', { exact: true })).not.toContainText('a3');
+  await page.locator('[data-square="54"]').click();
+  await expect(page.locator('[data-square="45"]')).toHaveClass(/legal/);
+});
+
+test('reset respects the reduced-motion preference', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await recordPlacements(page);
+  await page.getByRole('button', { name: 'New local game', exact: true }).click();
+  await page.getByRole('button', { name: 'Start new game', exact: true }).click();
+  await expect(page.locator('.piece-face')).toHaveCount(32);
+  const animationNames = await page
+    .locator('.piece-face')
+    .evaluateAll((pieces) => pieces.map((piece) => getComputedStyle(piece).animationName));
+  expect(animationNames.every((name) => name === 'none')).toBe(true);
+  expect(await placementEvents(page)).toHaveLength(0);
+});
+
+test('reconnecting prevents a forfeit, then an absent opponent automatically loses after 30 seconds', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const { host, guest } = await pair(browser);
+  let guestClosed = false;
+  try {
+    await host.page.getByLabel('Clock mode', { exact: true }).selectOption('untimed');
+    const settings = host.page.waitForResponse((response) => response.url().endsWith('/settings'));
+    await host.page.getByRole('button', { name: 'Save match settings' }).click();
+    expect((await settings).ok()).toBe(true);
+    await host.page.getByRole('button', { name: 'Ready to play', exact: true }).click();
+    await guest.page.getByRole('button', { name: 'Ready to play', exact: true }).click();
+    await expect(
+      host.page.getByRole('heading', { name: 'Red to move', exact: true }),
+    ).toBeVisible();
+    await move(host, 54, 45);
+    await guest.context.setOffline(true);
+    await expect
+      .poll(async () => (await snapshot(host)).seats.black?.connected, {
+        timeout: 20_000,
+      })
+      .toBe(false);
+    expect((await snapshot(host)).result).toBeNull();
+    await guest.context.setOffline(false);
+    await expect.poll(async () => (await snapshot(host)).seats.black?.connected).toBe(true);
+    expect((await snapshot(host)).status).toBe('playing');
+    await recordPlacements(host.page);
+    await guest.context.close();
+    guestClosed = true;
+    await expect(host.page.getByTestId('return-notice')).toContainText(/won|win/i, {
+      timeout: 40_000,
+    });
+    await expect(
+      host.page.getByRole('heading', { name: 'A table for two', exact: true }),
+    ).toBeVisible();
+    expect(new URL(host.page.url()).searchParams.has('room')).toBe(false);
+    await expectPlacementAnimation(host.page);
+    await expect(host.page.locator('[data-square="54"]')).toHaveAttribute(
+      'aria-label',
+      'Red soldier at a3',
+    );
+    expect((await snapshot(host)).result).toEqual({ winner: 'red', reason: 'disconnect' });
+  } finally {
+    await host.context.close();
+    if (!guestClosed) await guest.context.close();
+  }
+});
+
 test('leaving a room cannot be reversed by a delayed room snapshot', async ({ browser }) => {
   const { host, guest } = await pair(browser);
   let release!: () => void;
@@ -293,6 +427,62 @@ test('leaving a room cannot be reversed by a delayed room snapshot', async ({ br
     ).toBeVisible();
     await expect(host.page.getByTestId('room-code')).toHaveCount(0);
     expect(new URL(host.page.url()).searchParams.has('room')).toBe(false);
+  } finally {
+    release();
+    await host.context.close();
+    await guest.context.close();
+  }
+});
+
+test('a delayed leave from an older visit cannot disconnect a restored seat', async ({
+  browser,
+}) => {
+  const { host, guest } = await pair(browser);
+  let release!: () => void;
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  let captured!: () => void;
+  const inFlight = new Promise<void>((done) => {
+    captured = done;
+  });
+  let leaveCaptured = false;
+  try {
+    const before = await snapshot(host);
+    await host.page.route(new RegExp(`/api/rooms/${host.code}/leave$`), async (route) => {
+      if (leaveCaptured) {
+        await route.continue();
+        return;
+      }
+      leaveCaptured = true;
+      expect(route.request().postDataJSON().presenceId).toBe(before.you.presenceId);
+      captured();
+      await gate;
+      await route.continue();
+    });
+    const delayedLeave = host.page.waitForResponse((response) =>
+      response.url().endsWith(`/api/rooms/${host.code}/leave`),
+    );
+    await host.page.getByRole('button', { name: 'Leave room', exact: true }).click();
+    await host.page.getByRole('button', { name: 'Leave table', exact: true }).click();
+    await inFlight;
+    await expect(
+      host.page.getByRole('heading', { name: 'A table for two', exact: true }),
+    ).toBeVisible();
+    await host.page.getByLabel('Your name', { exact: true }).fill('River');
+    await host.page.getByLabel('Room code', { exact: true }).fill(host.code);
+    const rejoined = host.page.waitForResponse((response) =>
+      response.url().endsWith(`/api/rooms/${host.code}/join`),
+    );
+    await host.page.getByRole('button', { name: 'Join room', exact: true }).click();
+    const restored = ((await (await rejoined).json()) as RoomResponse).snapshot;
+    expect(restored.you.presenceId).not.toBe(before.you.presenceId);
+    await expect(host.page.getByTestId('room-code')).toHaveText(host.code);
+    release();
+    expect((await delayedLeave).ok()).toBe(true);
+    expect((await snapshot(guest)).seats.red?.connected).toBe(true);
+    expect((await snapshot(host)).you.presenceId).toBe(restored.you.presenceId);
+    await expect(host.page.getByTestId('room-code')).toHaveText(host.code);
   } finally {
     release();
     await host.context.close();

@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   applyMove,
@@ -67,6 +67,7 @@ function remaining(room: RoomSnapshot | null, side: Color, now: number) {
 
 export function XiangqiApp() {
   const room = useRoom();
+  const { leave: leaveRoom } = room;
   const [localGame, setLocalGame] = useState<GameState>(initialGame);
   const [preferences, setPreferences] = useState<Preferences>(defaults);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
@@ -81,9 +82,49 @@ export function XiangqiApp() {
   const [copied, setCopied] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<RoomSettings>(settingDefaults);
   const [localResult, setLocalResult] = useState<ReturnType<typeof gameResult>>(null);
+  const [boardResetId, setBoardResetId] = useState(0);
+  const [returnNotice, setReturnNotice] = useState<{ title: string; description: string } | null>(
+    null,
+  );
   const snapshot = room.snapshot;
   const game = snapshot?.game ?? localGame;
   const result = snapshot ? snapshot.result : localResult;
+  const resetLocalBoard = useCallback(() => {
+    setLocalGame(initialGame());
+    setLocalResult(null);
+    setFlipped(false);
+    setBoardResetId((value) => value + 1);
+    setAnnouncement('A fresh board. Red to move.');
+  }, []);
+  const returnHome = useCallback(
+    (notify = true) => {
+      resetLocalBoard();
+      setPanel(null);
+      setMobileMenu(false);
+      setConfirmation(null);
+      if (notify) setReturnNotice(null);
+      leaveRoom(notify);
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    },
+    [leaveRoom, resetLocalBoard],
+  );
+  const forfeitedGameId = snapshot?.result?.reason === 'disconnect' ? snapshot.gameId : null;
+  const forfeitedWinner = snapshot?.result?.winner;
+  const ownColor = snapshot?.you.color;
+  const opponentName =
+    snapshot?.seats[opposite(snapshot.you.color)]?.displayName ?? 'Your opponent';
+  useEffect(() => {
+    if (!forfeitedGameId || !ownColor) return;
+    setReturnNotice({
+      title: forfeitedWinner === ownColor ? 'You win' : 'Game over',
+      description:
+        forfeitedWinner === ownColor
+          ? `${opponentName} was disconnected for 30 seconds. A fresh table is ready.`
+          : 'You were disconnected for 30 seconds. The match has ended.',
+    });
+    const timer = setTimeout(() => returnHome(false), 1600);
+    return () => clearTimeout(timer);
+  }, [forfeitedGameId, forfeitedWinner, ownColor, opponentName, returnHome]);
   const previous = useRef<RoomSnapshot | null>(null);
   const alertedLow = useRef('');
   const soundPrefs = useRef(preferences);
@@ -316,7 +357,15 @@ export function XiangqiApp() {
     );
   }
   const opponent = snapshot?.seats[opposite(snapshot.you.color)];
-  const disconnectMs = opponent && !opponent.connected ? serverNow - opponent.lastSeenAt : 0;
+  const disconnectSeconds =
+    opponent && !opponent.connected
+      ? Math.max(
+          0,
+          Math.ceil(
+            ((opponent.disconnectDeadline ?? opponent.lastSeenAt + 30000) - serverNow) / 1000,
+          ),
+        )
+      : 0;
   const draw = snapshot?.pendingOffers.draw;
   const undo = snapshot?.pendingOffers.undo;
 
@@ -466,7 +515,22 @@ export function XiangqiApp() {
               </button>
             )}
           </div>
-          {room.error && (
+          {!snapshot && returnNotice && (
+            <div className="return-notice" role="status" data-testid="return-notice">
+              <div>
+                <strong>{returnNotice.title}</strong>
+                <p>{returnNotice.description}</p>
+              </div>
+              <button
+                className="icon-button"
+                aria-label="Dismiss result"
+                onClick={() => setReturnNotice(null)}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          )}
+          {room.error && !room.invitation && (
             <div className="error-notice" role="alert">
               <span>{room.error}</span>
               <button className="text-button" onClick={() => room.setError('')}>
@@ -479,7 +543,7 @@ export function XiangqiApp() {
               {player(topSide)}
               <div className="board-stage">
                 <Board
-                  key={snapshot?.code ?? 'local'}
+                  key={snapshot ? `${snapshot.code}:${snapshot.gameId}` : `local:${boardResetId}`}
                   game={game}
                   flipped={displayFlipped}
                   canMove={canMove}
@@ -782,41 +846,35 @@ export function XiangqiApp() {
                 {opponent && !opponent.connected && activeStatus === 'playing' && (
                   <div className="offer-notice">
                     <p>Opponent disconnected. Their clock keeps running.</p>
-                    {disconnectMs >= 90000 ? (
-                      <button
-                        className="button button-secondary"
-                        onClick={() => void room.action('claim')}
-                      >
-                        Claim disconnect win
-                      </button>
-                    ) : (
-                      <span>
-                        Win can be claimed in{' '}
-                        {Math.max(0, Math.ceil((90000 - disconnectMs) / 1000))}s.
-                      </span>
-                    )}
+                    <span>
+                      {disconnectSeconds > 0
+                        ? `They have ${disconnectSeconds}s to return before an automatic loss.`
+                        : 'Finalizing the result…'}
+                    </span>
                   </div>
                 )}
-                {snapshot && (activeStatus === 'finished' || activeStatus === 'aborted') && (
-                  <button
-                    className="button button-primary full-width"
-                    disabled={
-                      room.busy || snapshot.pendingOffers.rematch.includes(snapshot.you.color)
-                    }
-                    onClick={() =>
-                      void room.action('rematch', {
-                        action: snapshot.pendingOffers.rematch.length ? 'accept' : 'request',
-                      })
-                    }
-                  >
-                    <Icon name="refresh" />
-                    {snapshot.pendingOffers.rematch.includes(snapshot.you.color)
-                      ? 'Waiting for rematch…'
-                      : snapshot.pendingOffers.rematch.length
-                        ? 'Accept rematch'
-                        : 'Request rematch'}
-                  </button>
-                )}
+                {snapshot &&
+                  !forfeitedGameId &&
+                  (activeStatus === 'finished' || activeStatus === 'aborted') && (
+                    <button
+                      className="button button-primary full-width"
+                      disabled={
+                        room.busy || snapshot.pendingOffers.rematch.includes(snapshot.you.color)
+                      }
+                      onClick={() =>
+                        void room.action('rematch', {
+                          action: snapshot.pendingOffers.rematch.length ? 'accept' : 'request',
+                        })
+                      }
+                    >
+                      <Icon name="refresh" />
+                      {snapshot.pendingOffers.rematch.includes(snapshot.you.color)
+                        ? 'Waiting for rematch…'
+                        : snapshot.pendingOffers.rematch.length
+                          ? 'Accept rematch'
+                          : 'Request rematch'}
+                    </button>
+                  )}
                 {!snapshot && (
                   <button className="text-button" onClick={() => setConfirmation('reset')}>
                     <Icon name="refresh" size={16} />
@@ -885,6 +943,85 @@ export function XiangqiApp() {
           </footer>
         </main>
       </div>
+      {room.invitation && (
+        <Modal
+          title="Join room"
+          onClose={() => {
+            if (!room.busy) room.leave(false);
+          }}
+        >
+          <p className="modal-description">A friend has invited you to the table.</p>
+          {room.inviteLoading && (
+            <p className="invite-loading" role="status">
+              Opening your invitation…
+            </p>
+          )}
+          {room.invitePreview && (
+            <div className="invite-opponent">
+              <div
+                className={`player-avatar ${room.invitePreview.opponent.color}`}
+                aria-hidden="true"
+              >
+                {room.invitePreview.opponent.color === 'red' ? '帥' : '將'}
+              </div>
+              <div>
+                <strong>{room.invitePreview.opponent.displayName}</strong>
+                <p>
+                  {sideName(room.invitePreview.opponent.color)} ·{' '}
+                  {clockDescription(room.invitePreview.settings)}
+                </p>
+              </div>
+              <span className="invite-seat-label">Your opponent</span>
+            </div>
+          )}
+          {(room.inviteError || room.error) && (
+            <p className="invite-error" role="alert">
+              {room.inviteError || room.error}
+            </p>
+          )}
+          {room.invitePreview && !room.invitePreview.canJoin && (
+            <p className="invite-error" role="status">
+              {room.invitePreview.status === 'waiting'
+                ? 'Both seats are taken. Ask your friend for a fresh invitation.'
+                : 'This game has already started. Ask your friend for a new room.'}
+            </p>
+          )}
+          <form
+            className="invite-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void enableSound();
+              void room.enter(name, room.invitation!);
+            }}
+          >
+            <label htmlFor="invite-name">Your name</label>
+            <input
+              id="invite-name"
+              autoFocus
+              autoComplete="nickname"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={20}
+              placeholder="What should we call you?"
+              disabled={room.busy}
+              required
+            />
+            <button
+              className="button button-primary full-width"
+              type="submit"
+              disabled={room.busy || !name.trim() || !room.invitePreview?.canJoin}
+            >
+              {room.busy ? 'Joining the table…' : 'Join room'}
+              <Icon name="arrow" size={17} />
+            </button>
+          </form>
+          <p className="small-note">
+            {room.invitePreview?.canJoin
+              ? 'Choose a name, take your seat, and get ready to play.'
+              : 'You can close this invitation to return to your local board.'}
+          </p>
+        </Modal>
+      )}
       {snapshot && !soundUnlocked && !preferences.muted && (
         <button className="sound-prompt button button-secondary" onClick={() => void enableSound()}>
           <Icon name="sound" />
@@ -1008,7 +1145,7 @@ export function XiangqiApp() {
             {confirmation === 'resign'
               ? 'Your opponent will win this game. You can still play a rematch.'
               : confirmation === 'leave'
-                ? 'Your seat stays saved on this device. The clock keeps running while you are away.'
+                ? 'Your seat stays saved on this device. During a game, leaving for 30 seconds forfeits the match.'
                 : `${game.moves.length ? `Your ${game.moves.length} local moves will be cleared.` : 'The pieces will return to their starting positions.'}`}
           </p>
           <div className="confirmation-actions">
@@ -1019,11 +1156,10 @@ export function XiangqiApp() {
               className="button button-primary"
               onClick={() => {
                 if (confirmation === 'resign') void room.action('resign');
-                else if (confirmation === 'leave') room.leave();
+                else if (confirmation === 'leave') returnHome();
                 else {
-                  setLocalGame(initialGame());
-                  setLocalResult(null);
-                  setAnnouncement('A fresh board. Red to move.');
+                  setReturnNotice(null);
+                  resetLocalBoard();
                 }
                 setConfirmation(null);
               }}
@@ -1240,7 +1376,8 @@ function Rules() {
       <p>
         The server keeps time, even during a disconnect. Increment is skipped on each player’s first
         move. Before any move, either player can cancel during the first 30 seconds. A disconnect
-        win can be claimed after 90 seconds.
+        loss is automatic after 30 seconds away while the other player remains connected. Return
+        before the deadline to continue. When both players are away, neither wins by absence alone.
       </p>
       <h3>Keyboard play</h3>
       <p>

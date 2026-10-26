@@ -9,3 +9,4 @@ test-results/
 playwright-report/
 *.tsbuildinfo
 .taste-skill/inspect/
+.taste-skill/changes/

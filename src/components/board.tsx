@@ -211,11 +211,12 @@ export function Board({
               {piece && (
                 <g
                   key={`${index}-${moved ? game.moves.length : 'rest'}`}
-                  className={`piece-face ${moved ? 'piece-moved' : ''}`}
+                  className={`piece-face ${game.moves.length === 0 ? 'piece-reset' : moved ? 'piece-moved' : ''}`}
                   style={
                     {
                       '--move-x': `${origin.x - x}px`,
                       '--move-y': `${origin.y - y}px`,
+                      '--setup-delay': `${index * 4}ms`,
                     } as CSSProperties
                   }
                 >

@@ -79,11 +79,13 @@ Use a phone and a laptop, or two independent browser profiles:
 1. Create a room, share the invite link, join, and select a timed mode.
 2. Ready both players, play legal moves, and check that both boards and clocks agree.
 3. Refresh each device and confirm that seats, moves, clocks, and pending offers survive.
-4. Disconnect one device briefly, then reconnect and confirm recovery from a full snapshot.
-5. Block the WebSocket transport and confirm HTTP polling continues the game.
-6. Let a clock expire; verify the winner and inspect the QStash callback, including while both browsers are closed.
-7. Test resignation, draw offer and acceptance, approved undo, and a rematch with colors swapped and both readiness states reset.
-8. Inspect application logs for errors and ensure seat tokens, authorization headers, and Redis credentials are absent.
+4. Open an invite link in a fresh browser profile and confirm the name dialog shows the host and match settings before joining.
+5. Disconnect one device briefly, then reconnect within 30 seconds and confirm recovery from a full snapshot without a forfeit.
+6. Leave one device disconnected for over 30 seconds while the other remains connected. Confirm the disconnected player loses automatically, the remaining player sees the result and returns to the main page, and the board resets with a quick piece-placement animation. Confirm the reduced-motion setting suppresses that animation.
+7. Block the WebSocket transport and confirm HTTP polling continues the game.
+8. Let a clock expire; verify the winner and inspect the QStash callback, including while both browsers are closed. Also inspect the scheduled disconnect checks; if both players are absent, neither side should receive an arbitrary disconnect win.
+9. Test resignation, draw offer and acceptance, approved undo, and a rematch with colors swapped and both readiness states reset. Ordinary polling must not replay the placement animation.
+10. Inspect application logs for errors and ensure seat tokens, authorization headers, and Redis credentials are absent.
 
 Test preview deployments before merging. The Git integration deploys `main` to production by default. A custom domain can be added under **Settings → Domains**; update `APP_BASE_URL` and redeploy when the canonical origin changes.
 
